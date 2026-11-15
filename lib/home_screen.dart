@@ -3,8 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:hijri/hijri_calendar.dart';
 
+import 'alarms.dart';
 import 'main.dart';
 import 'prayer_times.dart';
+
+/// المدة (بالدقائق) اللي يعرض فيها التطبيق الوقت المنقضي بعد الأذان
+const int kElapsedWindow = 30;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -36,21 +40,46 @@ class _HomeScreenState extends State<HomeScreen> {
     final nowMin = now.hour * 60 + now.minute + now.second / 60;
     final todayTimes = prayerTimesFor(today);
 
-    // الصلاة القادمة والعدّاد (دائماً من اليوم الحالي)
-    String? next;
-    for (final k in kPrayers) {
-      if (todayTimes[k]! > nowMin) {
-        next = k;
-        break;
-      }
+    // أحداث اليوم بالترتيب: الصلوات ومنتصف الليل والثلث الأخير (من الليلة الماضية إلى فجر الغد)
+    final yNight = nightStarting(today.subtract(const Duration(days: 1)));
+    final tNight = nightStarting(today);
+    final events = <(String, double)>[
+      for (final k in kNightKeys) (k, nightValue(yNight, k) - 1440),
+      for (final k in kPrayers) (k, todayTimes[k]!.toDouble()),
+      for (final k in kNightKeys) (k, nightValue(tNight, k)),
+      ('fajr', prayerTimesFor(today.add(const Duration(days: 1)))['fajr']! + 1440.0),
+    ]..sort((a, b) => a.$2.compareTo(b.$2));
+
+    // الحدث القادم، والحدث اللي دخل قبل أقل من kElapsedWindow دقيقة
+    final next = events.firstWhere((e) => e.$2 > nowMin);
+    (String, double)? current;
+    for (final e in events) {
+      final d = nowMin - e.$2;
+      if (d >= 0 && d < kElapsedWindow) current = e;
     }
-    final targetMin = next != null
-        ? todayTimes[next]!.toDouble()
-        : prayerTimesFor(today.add(const Duration(days: 1)))['fajr']! + 1440.0;
-    final secsLeft = ((targetMin - nowMin) * 60).ceil().clamp(0, 999999).toInt();
-    final h = secsLeft ~/ 3600;
-    final m = (secsLeft % 3600) ~/ 60;
-    final s = secsLeft % 60;
+    final int secs;
+    final String label;
+    if (current != null) {
+      secs = ((nowMin - current.$2) * 60).floor().clamp(0, 999999).toInt();
+      label = switch (current.$1) {
+        'midnight' => 'مضى على منتصف الليل',
+        'lastThird' => 'مضى على دخول الثلث الأخير',
+        _ => 'مضى على أذان ${kNames[current.$1]}',
+      };
+    } else {
+      secs = ((next.$2 - nowMin) * 60).ceil().clamp(0, 999999).toInt();
+      label = switch (next.$1) {
+        'midnight' => 'على منتصف الليل',
+        'lastThird' => 'على الثلث الأخير',
+        _ => 'على الأذان التالي',
+      };
+    }
+    final h = secs ~/ 3600;
+    final m = (secs % 3600) ~/ 60;
+    final s = secs % 60;
+    final active = current ?? next;
+    bool isActive(String k, num minutes) =>
+        k == active.$1 && (minutes - active.$2).abs() < 1;
 
     // اليوم المعروض
     final shown = today.add(Duration(days: _offset));
@@ -65,9 +94,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final cells = <_Cell>[
       for (final k in kOrder)
-        _Cell(kNames[k]!, t[k]!, highlight: isToday && k == next),
-      _Cell('منتصف الليل', night.midnight, small: true),
-      _Cell('الثلث الأخير', night.lastThird, small: true),
+        _Cell(kNames[k]!, t[k]!, highlight: isToday && isActive(k, t[k]!), key: k),
+      _Cell(kNames['midnight']!, night.midnight,
+          highlight: isToday && isActive('midnight', night.midnight), key: 'midnight'),
+      _Cell(kNames['lastThird']!, night.lastThird,
+          highlight: isToday && isActive('lastThird', night.lastThird), key: 'lastThird'),
     ];
 
     return Scaffold(
@@ -100,9 +131,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         crossAxisAlignment: CrossAxisAlignment.baseline,
                         textBaseline: TextBaseline.alphabetic,
                         children: [
-                          const Text('على الأذان التالي',
+                          Text(label,
                               textDirection: TextDirection.rtl,
-                              style: TextStyle(fontSize: 13, color: AppColors.inkDim)),
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  color: current != null ? AppColors.gold : AppColors.inkDim)),
                           const SizedBox(width: 10),
                           Text('$h:${m.toString().padLeft(2, '0')}',
                               style: const TextStyle(
@@ -173,9 +206,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(child: _PrayerCell(cells[r * 2], AppColors.bands[r])),
+                        Expanded(child: _cellView(cells[r * 2], AppColors.bands[r])),
                         Container(width: 1, color: Colors.black12),
-                        Expanded(child: _PrayerCell(cells[r * 2 + 1], AppColors.bands[r])),
+                        Expanded(child: _cellView(cells[r * 2 + 1], AppColors.bands[r])),
                       ],
                     ),
                   ),
@@ -187,6 +220,77 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+
+  Widget _cellView(_Cell c, Color bg) {
+    final k = c.key;
+    return _PrayerCell(
+      c,
+      bg,
+      alarmOn: k != null && Alarms.instance.isOn(k),
+      onLongPress: k == null ? null : () => _openAlarmSheet(k),
+    );
+  }
+
+  Future<void> _openAlarmSheet(String k) async {
+    final current = Alarms.instance.settingFor(k);
+    final name = kNames[k]!;
+    final choice = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: AppColors.g1,
+      showDragHandle: true,
+      builder: (c) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                  k == 'sunrise' || kNightKeys.contains(k) ? 'منبه $name' : 'منبه صلاة $name',
+                  style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
+            ),
+            for (final o in kAlarmOptions)
+              _option(c, o, current, o == 0 ? _atLabel(k) : 'قبل ${minutesLabel(o)}'),
+            _option(c, -1, current, 'إيقاف المنبه'),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    bool allowed;
+    try {
+      allowed = await Alarms.instance.set(k, choice);
+    } catch (_) {
+      allowed = false;
+    }
+    if (!mounted) return;
+    setState(() {});
+    final msg = choice < 0
+        ? 'تم إيقاف منبه $name'
+        : !allowed
+            ? 'فعّل الإشعارات للتطبيق من إعدادات الجوال عشان يشتغل المنبه'
+            : choice == 0
+                ? 'بينبهك التطبيق عند $name كل يوم'
+                : 'بينبهك التطبيق قبل $name بـ ${minutesLabel(choice)} كل يوم';
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(msg, textAlign: TextAlign.center)));
+  }
+
+  String _atLabel(String k) => switch (k) {
+        'sunrise' => 'عند الشروق',
+        'midnight' || 'lastThird' => 'عند دخوله',
+        _ => 'عند الأذان',
+      };
+
+  Widget _option(BuildContext c, int value, int current, String label) => ListTile(
+        leading: Icon(
+          value == current ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+          color: value == current ? AppColors.gold : AppColors.inkDim,
+        ),
+        title: Text(label, style: const TextStyle(fontSize: 17)),
+        onTap: () => Navigator.pop(c, value),
+      );
 }
 
 class _Cell {
@@ -194,19 +298,25 @@ class _Cell {
   final num minutes;
   final bool highlight;
   final bool small;
-  _Cell(this.name, this.minutes, {this.highlight = false, this.small = false});
+  final String? key; // مفتاح الصلاة لضبط المنبه
+  _Cell(this.name, this.minutes, {this.highlight = false, this.small = false, this.key});
 }
 
 class _PrayerCell extends StatelessWidget {
   final _Cell cell;
   final Color bg;
-  const _PrayerCell(this.cell, this.bg);
+  final bool alarmOn;
+  final VoidCallback? onLongPress;
+  const _PrayerCell(this.cell, this.bg, {this.alarmOn = false, this.onLongPress});
 
   @override
   Widget build(BuildContext context) {
     final f = formatMinutes(cell.minutes);
     final color = cell.highlight ? AppColors.hiInk : AppColors.ink;
-    return Container(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: onLongPress,
+      child: Container(
       decoration: BoxDecoration(
         color: cell.highlight ? Colors.white : bg,
         border: const Border(top: BorderSide(color: Colors.black12)),
@@ -215,11 +325,21 @@ class _PrayerCell extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(cell.name,
-              style: TextStyle(
-                  color: color,
-                  fontSize: 17,
-                  fontWeight: cell.small ? FontWeight.w500 : FontWeight.w600)),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(cell.name,
+                  style: TextStyle(
+                      color: color,
+                      fontSize: 17,
+                      fontWeight: cell.small ? FontWeight.w500 : FontWeight.w600)),
+              if (alarmOn) ...[
+                const SizedBox(width: 6),
+                Icon(Icons.notifications_active,
+                    size: 18, color: cell.highlight ? AppColors.g1 : AppColors.gold),
+              ],
+            ],
+          ),
           const SizedBox(height: 2),
           Directionality(
             textDirection: TextDirection.ltr,
@@ -234,12 +354,11 @@ class _PrayerCell extends StatelessWidget {
                         fontSize: cell.small ? 22 : 26,
                         fontWeight: FontWeight.w700,
                         fontFeatures: const [FontFeature.tabularFigures()])),
-                const SizedBox(width: 4),
-                Text(f.period, style: TextStyle(color: color, fontSize: 15)),
               ],
             ),
           ),
         ],
+      ),
       ),
     );
   }

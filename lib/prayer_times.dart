@@ -27,6 +27,8 @@ const Map<String, String> kNames = {
   'asr': 'العصر',
   'maghrib': 'المغرب',
   'isha': 'العشاء',
+  'midnight': 'منتصف الليل',
+  'lastThird': 'الثلث الأخير',
 };
 
 double _rad(double d) => d * math.pi / 180;
@@ -108,6 +110,9 @@ Map<String, int> prayerTimes(int y, int m, int d) {
 Map<String, int> prayerTimesFor(DateTime day) => prayerTimes(day.year, day.month, day.day);
 
 /// منتصف الليل وبداية الثلث الأخير (بالدقائق، قد تكون سالبة أو أكبر من 1440)
+/// أوقات الليل (منتصف الليل والثلث الأخير)
+const List<String> kNightKeys = ['midnight', 'lastThird'];
+
 class NightTimes {
   final double midnight;
   final double lastThird;
@@ -161,3 +166,13 @@ const List<int> kWeekOrder = [6, 7, 1, 2, 3, 4, 5];
 
 String isoDate(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+/// الليل الذي يبدأ بمغرب هذا اليوم، بالدقائق من منتصف ليل هذا اليوم
+NightTimes nightStarting(DateTime day) {
+  final mg = prayerTimesFor(day)['maghrib']!.toDouble();
+  final fj = prayerTimesFor(day.add(const Duration(days: 1)))['fajr']! + 1440.0;
+  final len = fj - mg;
+  return NightTimes(mg + len / 2, mg + 2 * len / 3);
+}
+
+double nightValue(NightTimes n, String key) => key == 'midnight' ? n.midnight : n.lastThird;

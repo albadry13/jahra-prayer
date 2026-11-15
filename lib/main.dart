@@ -2,9 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'alarms.dart';
 import 'home_screen.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Alarms.instance.init();
+  } catch (_) {
+    // التطبيق يشتغل حتى لو تعطلت المنبهات
+  }
   runApp(const JahraApp());
 }
 
